@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    container_name: ygai_web
+    # 启动前自动执行数据库迁移，然后启动 Django 服务
+    command: bash -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # 将本地当前目录挂载到容器内，这样：
+      # 1. 本地的 db.sqlite3 数据库文件可以持久化，不会因为容器重启而丢失
+      # 2. 修改代码可以实时生效
+      - .:/app
+    restart: unless-stopped
+
+  bot:
+    build: .
+    container_name: ygai_bot
+    # 启动钉钉机器人和定时任务
+    command: python manage.py run_dingtalk_bot
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    depends_on:
+      - web
+    restart: unless-stopped
