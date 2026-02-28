@@ -1,11 +1,11 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from http import HTTPStatus
-
 import dashscope
 from dashscope import Generation
 from django.conf import settings
 from django.utils import timezone
+import chinese_calendar
 
 from apps.todo.notion_client import query_incomplete_tasks, query_last_week_completed_tasks, query_notion_tasks
 from apps.channel.dingtalk.client import send_message
@@ -120,10 +120,23 @@ def weekly_report_job():
 
 
 def daily_top_tasks_job():
-    """每个工作日 9:00（周一除外）— 每日要事。"""
+    """按中国法定工作日（含调休工作日）9:00（工作日的周一除外）— 每日要事。"""
     now = timezone.localtime()
+
+    try:
+        if not chinese_calendar.is_workday(now):
+            logger.info("今日为中国法定休息日或周末不调休，跳过每日要事任务")
+            return
+    except Exception as e:
+        logger.error(f"判断法定节假日失败，降级为普通周末判断: {e}")
+        # 如果库或判断出错，降级回周一至周五判断
+        if now.weekday() >= 5:
+            return
+
+    # 周一不发每日要事（通常被周报替代）
     if now.weekday() == 0:
         return
+
     logger.info("执行每日要事任务...")
     tasks = query_incomplete_tasks()
     if not tasks:
@@ -204,10 +217,10 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    # 工作日（周一到周五）9:00
+    # 每天 9:00（在函数内部进行节假日判断）
     scheduler.add_job(
         daily_top_tasks_job,
-        CronTrigger(day_of_week='mon-fri', hour=9, minute=0),
+        CronTrigger(hour=9, minute=0),
         id='daily_top_tasks',
         replace_existing=True,
     )

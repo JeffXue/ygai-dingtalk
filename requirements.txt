@@ -9,3 +9,4 @@ apscheduler>=3.10
 pycryptodome>=3.20.0
 beautifulsoup4>=4.12
 lxml>=5.1
+chinesecalendar>=1.9
