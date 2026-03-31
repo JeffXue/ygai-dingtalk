@@ -70,7 +70,7 @@ def generate_daily_summary(tasks: list[dict]) -> str:
     prompt = (
         "你是一个项目管理助手。以下是当前所有未完成的任务列表：\n"
         f"{task_text}\n\n"
-        "请从中选出今天最重要的 2 个事项，用简洁的中文说明"
+        "请从中选出今天最重要的 3 个事项，用简洁的中文说明"
         "为什么它们最重要以及建议如何推进，每项不超过 50 字。"
     )
     return _call_ai(prompt)
@@ -105,8 +105,49 @@ def generate_last_week_summary(tasks: list[dict]) -> str:
 
 # ---- 定时任务 ----
 
+def is_first_workday_of_week(date_obj: date) -> bool:
+    """
+    判断给定日期是否是本周的第一个工作日。
+    逻辑：如果今天不是工作日，直接返回 False。
+    如果今天是工作日，检查本周（周一到昨天）是否有工作日。
+    如果有，今天就不是第一个工作日。如果都没有，今天就是第一个工作日。
+    如果节假日判断库失败，降级为判断是否是周一。
+    """
+    try:
+        # 如果今天不是工作日，肯定不是第一个工作日
+        if not chinese_calendar.is_workday(date_obj):
+            return False
+
+        # 今天是周几（0是周一，6是周日）
+        current_weekday = date_obj.weekday()
+
+        # 如果今天就是周一，那它一定是本周第一个工作日
+        if current_weekday == 0:
+            return True
+
+        # 检查本周一到昨天是否有工作日
+        # 例如今天是周三(2)，我们需要检查前两天(往前推 1 到 2 天)
+        for i in range(1, current_weekday + 1):
+            past_date = date_obj - timedelta(days=i)
+            # 如果之前有工作日，那今天就不是"第一个"工作日
+            if chinese_calendar.is_workday(past_date):
+                return False
+
+        # 之前都没有工作日且今天是工作日，所以今天就是第一个工作日
+        return True
+    except Exception as e:
+        logger.error(f"判断是否本周首个工作日失败，降级为周一检查: {e}")
+        # 如果库出错，退回到"只有周一是首个工作日"
+        return date_obj.weekday() == 0
+
+
 def weekly_report_job():
-    """每周一 9:00 — 周报摘要。"""
+    """本周首个工作日 9:00 — 周报摘要（原本在周一，现延迟到首个实际工作日）。"""
+    now = timezone.localtime()
+    if not is_first_workday_of_week(now.date()):
+        logger.info("今日非本周第一个工作日，跳过周报任务")
+        return
+
     logger.info("执行周报任务...")
     tasks = query_incomplete_tasks()
     if not tasks:
@@ -141,17 +182,40 @@ def daily_top_tasks_job():
     tasks = query_incomplete_tasks()
     if not tasks:
         return
-    # 按优先级排序
-    tasks.sort(key=lambda t: t['priority'])
+    # 按优先级排序，若优先级相同则按截止日期排序（越早越前），无截止日期排最后
+    def _sort_key(t):
+        priority = t['priority']
+        due_date = t.get('due_date')
+        if due_date:
+            # 移除 timezone 以便比较
+            due_date = due_date.replace(tzinfo=None)
+        else:
+            # 给无截止日期的任务一个最大时间值
+            due_date = datetime.max
+        return (priority, due_date)
+
+    tasks.sort(key=_sort_key)
     summary = generate_daily_summary(tasks)
     if summary:
         _notify(f"🌅 今日要事\n\n{summary}")
     else:
-        _notify(f"🌅 今日要事\n\n{_format_task_list(tasks[:2])}")
+        _notify(f"🌅 今日要事\n\n{_format_task_list(tasks[:3])}")
 
 
 def due_date_check_job():
-    """每小时执行 — 检查到期/即将到期任务。"""
+    """每天 18:00 执行 — 检查到期/即将到期任务（仅法定工作日）。"""
+    now = timezone.localtime()
+
+    try:
+        if not chinese_calendar.is_workday(now):
+            logger.info("今日为中国法定休息日或周末不调休，跳过到期提醒任务")
+            return
+    except Exception as e:
+        logger.error(f"判断法定节假日失败，降级为普通周末判断: {e}")
+        # 如果库或判断出错，降级回周一至周五判断
+        if now.weekday() >= 5:
+            return
+
     logger.info("执行到期检查任务...")
     tasks = query_incomplete_tasks()
     if not tasks:
@@ -186,7 +250,12 @@ def due_date_check_job():
 
 
 def last_week_summary_job():
-    """每周一 17:00 — 上周工作总结。"""
+    """本周首个工作日 17:00 — 上周工作总结（原本在周一，现延迟到首个实际工作日）。"""
+    now = timezone.localtime()
+    if not is_first_workday_of_week(now.date()):
+        logger.info("今日非本周第一个工作日，跳过上周工作总结任务")
+        return
+
     logger.info("执行上周工作总结任务...")
     tasks = query_last_week_completed_tasks()
     if not tasks:
@@ -209,10 +278,10 @@ def start_scheduler():
 
     scheduler = BackgroundScheduler(timezone='Asia/Shanghai')
 
-    # 每周一 9:00
+    # 每天 9:00（在函数内部进行节假日判断，推迟到首个工作日）
     scheduler.add_job(
         weekly_report_job,
-        CronTrigger(day_of_week='mon', hour=9, minute=0),
+        CronTrigger(hour=9, minute=0),
         id='weekly_report',
         replace_existing=True,
     )
@@ -225,10 +294,10 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    # 每周一 17:00
+    # 每天 17:00（在函数内部进行节假日判断，推迟到首个工作日）
     scheduler.add_job(
         last_week_summary_job,
-        CronTrigger(day_of_week='mon', hour=17, minute=0),
+        CronTrigger(hour=17, minute=0),
         id='last_week_summary',
         replace_existing=True,
     )

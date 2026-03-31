@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "WebFetch(domain:docs.openclaw.ai)"
+      "WebFetch(domain:docs.openclaw.ai)",
+      "Bash(venv/bin/pip install:*)",
+      "Bash(venv/bin/playwright install:*)"
     ]
   }
 }
